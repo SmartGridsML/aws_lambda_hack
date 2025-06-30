@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>API Monitor Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .stats { display: flex; gap: 20px; margin-bottom: 30px; }
+        .stat-card { 
+            background: white; 
+            padding: 20px; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            flex: 1;
+        }
+        .stat-value { font-size: 2em; font-weight: bold; margin-bottom: 5px; }
+        .healthy { color: #28a745; }
+        .unhealthy { color: #dc3545; }
+        .chart-container { 
+            background: white; 
+            padding: 20px; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 API Monitoring Dashboard</h1>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="uptime">--%</div>
+                <div>Uptime</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="latency">-- ms</div>
+                <div>Avg Latency</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="status">--</div>
+                <div>Current Status</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="lastCheck">--</div>
+                <div>Last Check</div>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h3>Response Time Trend</h3>
+            <canvas id="latencyChart" width="400" height="100"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <h3>Status Code Distribution</h3>
+            <canvas id="statusChart" width="400" height="100"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // Initialize charts
+        const latencyChart = new Chart(document.getElementById('latencyChart'), {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Response Time (ms)',
+                    data: [],
+                    borderColor: '#007bff',
+                    backgroundColor: 'rgba(0, 123, 255, 0.1)',
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+
+        const statusChart = new Chart(document.getElementById('statusChart'), {
+            type: 'doughnut',
+            data: {
+                labels: ['Success', 'Failure'],
+                datasets: [{
+                    data: [0, 0],
+                    backgroundColor: ['#28a745', '#dc3545']
+                }]
+            }
+        });
+
+        // Replace with your actual API Gateway URL
+        const API_URL = 'YOUR_API_GATEWAY_URL_HERE/metrics';
+        
+        async function updateDashboard() {
+            try {
+                const response = await fetch(API_URL);
+                const result = await response.json();
+                
+                if (result.success) {
+                    const data = result.data;
+                    
+                    // Update summary stats
+                    document.getElementById('uptime').textContent = data.summary.uptime.toFixed(1) + '%';
+                    document.getElementById('latency').textContent = data.summary.averageLatency.toFixed(0) + ' ms';
+                    
+                    const currentStatus = data.summary.uptime > 99 ? 'Healthy' : 'Issues';
+                    const statusElement = document.getElementById('status');
+                    statusElement.textContent = currentStatus;
+                    statusElement.className = 'stat-value ' + (currentStatus === 'Healthy' ? 'healthy' : 'unhealthy');
+                    
+                    // Update last check time
+                    if (data.summary.lastCheck) {
+                        const lastCheck = new Date(data.summary.lastCheck);
+                        document.getElementById('lastCheck').textContent = lastCheck.toLocaleTimeString();
+                    }
+                    
+                    // Update latency chart
+                    const latencyData = data.timeSeries.slice(-20); // Last 20 points
+                    latencyChart.data.labels = latencyData.map(d => new Date(d.timestamp).toLocaleTimeString());
+                    latencyChart.data.datasets[0].data = latencyData.map(d => d.latency);
+                    latencyChart.update();
+                    
+                    // Update status chart
+                    const successCount = data.timeSeries.filter(d => d.status === 'success').length;
+                    const failureCount = data.timeSeries.length - successCount;
+                    statusChart.data.datasets[0].data = [successCount, failureCount];
+                    statusChart.update();
+                }
+            } catch (error) {
+                console.error('Failed to update dashboard:', error);
+            }
+        }
+
+        // Update dashboard every 15 seconds
+        updateDashboard();
+        setInterval(updateDashboard, 15000);
+    </script>
+</body>
+</html>

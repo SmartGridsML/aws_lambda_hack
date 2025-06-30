@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Production API Monitoring System'
+
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 10
+    MemorySize: 512
+    Tracing: Active           
+    Environment:
+      Variables:
+        METRICS_TABLE: !Ref ApiMetricsTable
+        ALERT_TOPIC: !Ref AlertTopic
+
+Parameters:
+  MonitoredApiUrl:
+    Type: String
+    Default: 'https://httpstat.us/200'
+    Description: 'API endpoint to monitor'
+
+Resources:
+
+  ApiMetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-ApiMetrics'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-alerts'
+
+  FailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-failures'
+      VisibilityTimeoutSeconds: 60
+
+  HealthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: healthcheck.handler
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt FailureQueue.Arn
+      EventInvokeConfig:
+        DestinationConfig:
+          OnSuccess:
+            Type: SNS
+            Destination: !Ref AlertTopic
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt FailureQueue.Arn
+      Events:
+        HealthCheckSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            Input: !Sub |
+              {
+                "url": "${MonitoredApiUrl}",
+                "region": "${AWS::Region}"
+              }
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref ApiMetricsTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt AlertTopic.TopicName
+
+  DashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: dashboard.handler
+      Events:
+        ApiGateway:
+          Type: Api
+          Properties:
+            Path: /metrics
+            Method: get
+            Cors:
+              AllowOrigin: "'*'"
+              AllowHeaders: "'Content-Type'"
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ApiMetricsTable
+
+  AlertFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: alert.handler
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FailureQueue.Arn
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt AlertTopic.TopicName
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: bilal.saleem700@gmail.com # ← change to your address
+
+Outputs:
+  DashboardApi:
+    Description: 'API Gateway endpoint for metrics dashboard'
+    Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/metrics'
+  
+  MonitoredUrl:
+    Description: 'URL being monitored'
+    Value: !Ref MonitoredApiUrl
