@@ -9,39 +9,76 @@ from dotenv import load_dotenv
 from decimal import Decimal
 import json
 from typing import Optional, List, Dict, Any
-import uvicorn
 import asyncio
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 
-# Load environment variables
-load_dotenv()
+# Add Mangum for Lambda compatibility
+try:
+    from mangum import Mangum
+    LAMBDA_AVAILABLE = True
+except ImportError:
+    LAMBDA_AVAILABLE = False
+    print("⚠️ Mangum not installed. Lambda handler disabled.")
+
+# Load environment variables (for local development)
+if os.path.exists('.env'):
+    load_dotenv()
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Reddit Sentiment Analysis API",
     description="API for serving Reddit sentiment analysis data from DynamoDB",
-    version="1.0.0"
+    version="1.0.0",
+    # Add root_path for Lambda deployment
+    root_path=os.getenv("ROOT_PATH", "")
 )
 
-# Enable CORS for frontend dashboard
+# Enhanced CORS configuration for both local and Lambda deployment
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your domain
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:8080", 
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8080",
+        "file://",  # Allow file:// protocol for local HTML files
+        "*"  # Allow all origins for development
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
-# Initialize DynamoDB
-try:
-    dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
-    raw_posts_table = dynamodb.Table(os.getenv('RAW_POSTS_TABLE', 'reddit-raw-posts'))
-    processed_table = dynamodb.Table(os.getenv('PROCESSED_DATA_TABLE', 'reddit-processed-sentiment'))
-    print("✅ Connected to DynamoDB tables")
-except Exception as e:
-    print(f"❌ Failed to connect to DynamoDB: {e}")
+# Initialize DynamoDB with better error handling for Lambda
+def get_dynamodb_tables():
+    """Initialize DynamoDB tables with fallback for different environments"""
+    try:
+        # Use environment variables or defaults
+        region = os.getenv('AWS_REGION', 'us-east-1')
+        
+        # For Lambda, boto3 will automatically use the execution role
+        # For local development, it will use credentials from .env or AWS CLI
+        dynamodb = boto3.resource('dynamodb', region_name=region)
+        
+        raw_posts_table = dynamodb.Table(os.getenv('RAW_POSTS_TABLE', 'reddit-raw-posts'))
+        processed_table = dynamodb.Table(os.getenv('PROCESSED_DATA_TABLE', 'reddit-processed-sentiment'))
+        
+        # Test connection
+        raw_posts_table.scan(Limit=1)
+        processed_table.scan(Limit=1)
+        
+        print("✅ Connected to DynamoDB tables")
+        return raw_posts_table, processed_table
+        
+    except Exception as e:
+        print(f"❌ Failed to connect to DynamoDB: {e}")
+        return None, None
+
+# Initialize tables
+raw_posts_table, processed_table = get_dynamodb_tables()
 
 def decimal_to_float(obj):
     """Convert DynamoDB Decimal objects to float for JSON serialization"""
@@ -74,20 +111,35 @@ async def root():
         "message": "Reddit Sentiment Analysis API",
         "version": "1.0.0",
         "status": "operational",
+        "environment": "lambda" if os.getenv("AWS_LAMBDA_FUNCTION_NAME") else "local",
         "endpoints": {
             "sentiments": "/sentiments",
             "summary": "/sentiments/summary",
             "stats": "/stats/processing",
             "health": "/health",
+            "status": "/status",
             "docs": "/docs"
         },
         "timestamp": datetime.now().isoformat()
     }
 
+@app.get("/status")
+async def status():
+    """Simple status endpoint for Lambda health checks"""
+    return {
+        "status": "ok",
+        "timestamp": datetime.now().isoformat(),
+        "environment": "lambda" if os.getenv("AWS_LAMBDA_FUNCTION_NAME") else "local",
+        "database_connected": raw_posts_table is not None and processed_table is not None
+    }
+
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
+    """Comprehensive health check endpoint"""
     try:
+        if not raw_posts_table or not processed_table:
+            raise Exception("DynamoDB tables not initialized")
+            
         # Test DynamoDB connection
         raw_posts_table.scan(Limit=1)
         processed_table.scan(Limit=1)
@@ -98,6 +150,7 @@ async def health_check():
                 "dynamodb": "connected",
                 "api": "operational"
             },
+            "environment": "lambda" if os.getenv("AWS_LAMBDA_FUNCTION_NAME") else "local",
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
@@ -111,6 +164,9 @@ async def get_sentiments(
 ):
     """Get sentiment analysis results with optional filtering"""
     try:
+        if not processed_table:
+            raise HTTPException(status_code=503, detail="Database not available")
+            
         # Build scan parameters
         scan_kwargs = {'Limit': limit}
         
@@ -162,6 +218,9 @@ async def get_sentiments(
 async def get_sentiment_summary():
     """Get aggregate sentiment statistics"""
     try:
+        if not processed_table:
+            raise HTTPException(status_code=503, detail="Database not available")
+            
         # Scan all processed sentiment data
         response = processed_table.scan()
         items = response.get('Items', [])
@@ -213,6 +272,9 @@ async def get_sentiment_summary():
 async def get_processing_stats():
     """Get processing statistics and system metrics"""
     try:
+        if not raw_posts_table or not processed_table:
+            raise HTTPException(status_code=503, detail="Database not available")
+            
         # Get raw posts count
         raw_response = raw_posts_table.scan(Select='COUNT')
         raw_count = raw_response.get('Count', 0)
@@ -245,85 +307,6 @@ async def get_processing_stats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching processing stats: {str(e)}")
 
-@app.get("/sentiments/search")
-async def search_sentiments(
-    query: str = Query(..., description="Search term to look for in post content"),
-    limit: int = Query(20, ge=1, le=100, description="Number of results to return")
-):
-    """Search sentiment data by content"""
-    try:
-        # Scan with text search filter
-        response = processed_table.scan(
-            FilterExpression=Attr('input_text').contains(query),
-            Limit=limit
-        )
-        
-        items = response.get('Items', [])
-        
-        # Format results
-        results = []
-        for item in items:
-            result = {
-                'analysis_id': item.get('analysis_id', ''),
-                'timestamp': format_timestamp(item.get('processed_timestamp')),
-                'inputText': item.get('input_text', ''),
-                'sentiment': item.get('sentiment', 'NEUTRAL'),
-                'confidence_score': decimal_to_float(item.get('confidence_score', 0)),
-                'subreddit': item.get('subreddit', 'unknown'),
-                'keywords_detected': item.get('keywords_detected', [])
-            }
-            results.append(result)
-        
-        return {
-            'query': query,
-            'results_count': len(results),
-            'results': results
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error searching sentiments: {str(e)}")
-
-@app.get("/subreddits")
-async def get_subreddit_stats():
-    """Get statistics by subreddit"""
-    try:
-        # Get all processed data
-        response = processed_table.scan()
-        items = response.get('Items', [])
-        
-        # Group by subreddit
-        subreddit_stats = {}
-        
-        for item in items:
-            subreddit = item.get('subreddit', 'unknown')
-            sentiment = item.get('sentiment', 'NEUTRAL')
-            confidence = decimal_to_float(item.get('confidence_score', 0))
-            
-            if subreddit not in subreddit_stats:
-                subreddit_stats[subreddit] = {
-                    'total_posts': 0,
-                    'sentiments': {'POSITIVE': 0, 'NEGATIVE': 0, 'NEUTRAL': 0, 'MIXED': 0},
-                    'total_confidence': 0
-                }
-            
-            subreddit_stats[subreddit]['total_posts'] += 1
-            subreddit_stats[subreddit]['sentiments'][sentiment] += 1
-            subreddit_stats[subreddit]['total_confidence'] += confidence
-        
-        # Calculate averages and percentages
-        for subreddit, stats in subreddit_stats.items():
-            total = stats['total_posts']
-            stats['average_confidence'] = round(stats['total_confidence'] / total, 3) if total > 0 else 0
-            stats['sentiment_percentages'] = {
-                sentiment: round((count / total * 100), 1) if total > 0 else 0
-                for sentiment, count in stats['sentiments'].items()
-            }
-        
-        return subreddit_stats
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching subreddit stats: {str(e)}")
-
 # Data models for scraping requests
 class ScrapeRequest(BaseModel):
     analysis_type: str  # 'keywords', 'subreddits', or 'both'
@@ -335,7 +318,7 @@ class SentimentProcessRequest(BaseModel):
     processing_mode: str = 'batch'
     batch_size: int = 50
 
-# Global storage for job status (in production, use Redis or database)
+# Global storage for job status (in production, use Redis or DynamoDB)
 job_status = {}
 
 @app.post("/scrape/start")
@@ -354,7 +337,8 @@ async def start_scraping(request: ScrapeRequest):
             'error': None
         }
         
-        # Start scraping in background
+        # Note: In Lambda, you might want to use SQS or Step Functions for long-running tasks
+        # For now, we'll use background tasks (may timeout in Lambda)
         asyncio.create_task(run_scraping_job(job_id, request))
         
         return {
@@ -374,34 +358,10 @@ async def get_scraping_status(job_id: str):
     
     return job_status[job_id]
 
-@app.post("/process/sentiment")
-async def process_sentiment(request: SentimentProcessRequest):
-    """Process sentiment analysis on scraped data"""
-    try:
-        # Import your lambda function
-        from lambda_func import lambda_handler
-        
-        # Create event for lambda function
-        event = {
-            'processing_mode': request.processing_mode,
-            'batch_size': request.batch_size
-        }
-        
-        # Run sentiment processing
-        result = lambda_handler(event, {})
-        
-        return {
-            'status': 'completed',
-            'results': json.loads(result['body']) if isinstance(result.get('body'), str) else result
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sentiment processing failed: {str(e)}")
-
 async def run_scraping_job(job_id: str, request: ScrapeRequest):
     """Run the actual scraping job in background"""
     try:
-        # Import your scraper
+        # Import your scraper (may need to be restructured for Lambda)
         from main import RedditScraperDynamoDB
         
         # Update status
@@ -477,28 +437,6 @@ async def run_scraping_job(job_id: str, request: ScrapeRequest):
             'end_time': datetime.now().isoformat()
         })
 
-# Add this endpoint for job cleanup
-@app.delete("/scrape/jobs")
-async def cleanup_old_jobs():
-    """Clean up old job statuses"""
-    try:
-        current_time = datetime.now()
-        old_jobs = []
-        
-        for job_id, status in job_status.items():
-            if 'end_time' in status:
-                end_time = datetime.fromisoformat(status['end_time'])
-                if (current_time - end_time).total_seconds() > 3600:  # 1 hour old
-                    old_jobs.append(job_id)
-        
-        for job_id in old_jobs:
-            del job_status[job_id]
-        
-        return {'cleaned_jobs': len(old_jobs)}
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
-
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
     """Custom 404 handler"""
@@ -508,8 +446,8 @@ async def not_found_handler(request, exc):
             "error": "Endpoint not found",
             "message": "The requested endpoint does not exist",
             "available_endpoints": [
-                "/", "/health", "/sentiments", "/sentiments/summary", 
-                "/stats/processing", "/sentiments/search", "/subreddits", "/docs"
+                "/", "/health", "/status", "/sentiments", "/sentiments/summary", 
+                "/stats/processing", "/docs"
             ]
         }
     )
@@ -526,13 +464,36 @@ async def internal_error_handler(request, exc):
         }
     )
 
-if __name__ == "__main__":
-    
+# =====================================
+# LAMBDA HANDLER CONFIGURATION
+# =====================================
+
+# Create Lambda handler using Mangum
+if LAMBDA_AVAILABLE:
+    handler = Mangum(
+        app,
+        lifespan="off",  # Disable lifespan for Lambda
+        api_gateway_base_path="/",  # Adjust based on your API Gateway setup
+    )
+    print("✅ Lambda handler created with Mangum")
+else:
+    handler = None
+    print("⚠️ Lambda handler not available (Mangum not installed)")
+
+# =====================================
+# LOCAL DEVELOPMENT SERVER
+# =====================================
+
+def run_local_server():
+    """Run the FastAPI server locally"""
+    import uvicorn
     
     print("🚀 Starting Reddit Sentiment Analysis API...")
     print("📊 Dashboard: Open frontend/index.html in your browser")
     print("📚 API Docs: http://localhost:8000/docs")
     print("🔍 API Root: http://localhost:8000/")
+    print("💚 Health Check: http://localhost:8000/health")
+    print("📊 Status: http://localhost:8000/status")
     
     uvicorn.run(
         app, 
@@ -540,3 +501,10 @@ if __name__ == "__main__":
         port=8000,
         reload=True  # Auto-reload on code changes
     )
+
+if __name__ == "__main__":
+    # Only run the local server if not in Lambda environment
+    if not os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        run_local_server()
+    else:
+        print("🔧 Running in Lambda environment")
