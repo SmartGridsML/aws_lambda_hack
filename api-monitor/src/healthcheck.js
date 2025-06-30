@@ -12,6 +12,15 @@ const dynamodb = new AWS.DynamoDB.DocumentClient({
 });
 
 /**
+ * Detect if running in local environment
+ */
+function isLocalEnvironment() {
+  return process.env.AWS_SAM_LOCAL === 'true' || 
+         process.env.AWS_LAMBDA_FUNCTION_NAME === undefined ||
+         !process.env.METRICS_TABLE;
+}
+
+/**
  * Health check handler with comprehensive monitoring
  * This function demonstrates several advanced patterns:
  * 1. Structured error handling for Lambda Destinations
@@ -48,11 +57,15 @@ exports.handler = async (event) => {
       sslInfo: result.sslInfo || null
     };
     
-    // Store metrics in DynamoDB
-    await dynamodb.put({
-      TableName: process.env.METRICS_TABLE,
-      Item: metrics
-    }).promise();
+    // Store metrics in DynamoDB (skip when running locally)
+    if (!isLocalEnvironment()) {
+      await dynamodb.put({
+        TableName: process.env.METRICS_TABLE,
+        Item: metrics
+      }).promise();
+    } else {
+      console.log(`[local] skipping DynamoDB write:`, metrics);
+    }
     
     console.log('Health check completed successfully:', metrics);
     
@@ -86,14 +99,18 @@ exports.handler = async (event) => {
       errorMessage: error.message
     };
     
-    // Still record the failure in DynamoDB
-    try {
-      await dynamodb.put({
-        TableName: process.env.METRICS_TABLE,
-        Item: failureMetrics
-      }).promise();
-    } catch (dbError) {
-      console.error('Failed to record failure metrics:', dbError);
+    // Skip recording failures locally
+    if (!isLocalEnvironment()) {
+      try {
+        await dynamodb.put({
+          TableName: process.env.METRICS_TABLE,
+          Item: failureMetrics
+        }).promise();
+      } catch (dbError) {
+        console.error('Failed to record failure metrics:', dbError);
+      }
+    } else {
+      console.log(`[local] skipping failure write:`, failureMetrics);
     }
     
     // Throw error to trigger Lambda Destinations failure path

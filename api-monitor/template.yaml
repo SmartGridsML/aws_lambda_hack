@@ -7,7 +7,7 @@ Globals:
     Runtime: nodejs18.x
     Timeout: 10
     MemorySize: 512
-    Tracing: Active           
+    Tracing: Active
     Environment:
       Variables:
         METRICS_TABLE: !Ref ApiMetricsTable
@@ -21,6 +21,7 @@ Parameters:
 
 Resources:
 
+  ## DynamoDB table for storing metrics
   ApiMetricsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -39,17 +40,33 @@ Resources:
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
 
+  ## SNS topic for success alerts & logs
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub '${AWS::StackName}-alerts'
 
+  ## SQS queue for failures
   FailureQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub '${AWS::StackName}-failures'
-      VisibilityTimeoutSeconds: 60
+      VisibilityTimeout: 60
 
+  ## 1) HTTP API Gateway v2 with CORS enabled
+  ApiGateway:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'                 # allow all origins
+        AllowMethods:
+          - GET
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+
+  ## 2) Core health-check Lambda, triggered on a schedule
   HealthCheckFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -82,24 +99,7 @@ Resources:
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt AlertTopic.TopicName
 
-  DashboardFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/
-      Handler: dashboard.handler
-      Events:
-        ApiGateway:
-          Type: Api
-          Properties:
-            Path: /metrics
-            Method: get
-            Cors:
-              AllowOrigin: "'*'"
-              AllowHeaders: "'Content-Type'"
-      Policies:
-        - DynamoDBReadPolicy:
-            TableName: !Ref ApiMetricsTable
-
+  ## 3) Alert processing Lambda, consuming failures from SQS
   AlertFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -114,18 +114,42 @@ Resources:
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt AlertTopic.TopicName
 
+  ## 4) Dashboard Lambda, exposed via our HttpApi
+  DashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: dashboard.handler
+      Events:
+        MetricsEndpoint:
+          Type: HttpApi
+          Properties:
+            Path: /metrics
+            Method: GET
+            ApiId: !Ref ApiGateway
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ApiMetricsTable
+
+  ## 5) Email subscription for demo
   EmailSubscription:
     Type: AWS::SNS::Subscription
     Properties:
       TopicArn: !Ref AlertTopic
       Protocol: email
-      Endpoint: bilal.saleem700@gmail.com # ← change to your address
+      Endpoint: bilal.saleem700@gmail.com  # ← update to your address
 
 Outputs:
+  ## HTTP API endpoint (no stage in snip)
+  ApiBaseUrl:
+    Description: 'HTTP API base URL'
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com'
+
+  ## Dashboard full URL
   DashboardApi:
-    Description: 'API Gateway endpoint for metrics dashboard'
-    Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/metrics'
-  
+    Description: 'GET /metrics endpoint'
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/metrics'
+
   MonitoredUrl:
     Description: 'URL being monitored'
     Value: !Ref MonitoredApiUrl
