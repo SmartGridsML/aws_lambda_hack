@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Real-Time Sentiment Analysis Dashboard
+
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 10
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        SENTIMENT_TABLE: !Ref SentimentTable
+
+Parameters:
+  FeedbackApiKey:
+    Type: String
+    NoEcho: true
+    Description: API key for your own feedback endpoint (if used)
+
+Resources:
+
+  ## DynamoDB table to store sentiments
+  SentimentTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-Sentiment'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  ## Ingestion Lambda: receives feedback via API Gateway
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: ingest.lambda_handler
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref SentimentTable
+      Events:
+        FeedbackApi:
+          Type: HttpApi
+          Properties:
+            Path: /feedback
+            Method: post
+            ApiId: !Ref HttpApi
+
+  ## Sentiment Processor Lambda: called by DynamoDB Stream
+  ProcessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: process.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SentimentTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref SentimentTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - comprehend:DetectSentiment
+              Resource: '*'
+      Events:
+        SentimentStream:
+          Type: DynamoDB
+          Properties:
+            Stream: 
+              Fn::GetAtt: [ SentimentTable, StreamArn ]
+            StartingPosition: TRIM_HORIZON
+
+  ## Dashboard Lambda: returns aggregated results
+  DashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: dashboard.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SentimentTable
+      Events:
+        DashboardApi:
+          Type: HttpApi
+          Properties:
+            Path: /dashboard
+            Method: get
+            ApiId: !Ref HttpApi
+
+  ## HTTP API Gateway
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowMethods: ['GET','POST','OPTIONS']
+        AllowHeaders: ['Content-Type']
+
+Outputs:
+  FeedbackEndpoint:
+    Description: POST your feedback JSON here
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/feedback'
+  DashboardEndpoint:
+    Description: GET aggregated sentiment data
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/dashboard'
