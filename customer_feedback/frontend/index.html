@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reddit Sentiment Analysis Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background-color: #f4f7f6; color: #333; }
+        header { background-color: #232f3e; color: white; padding: 20px; text-align: center; }
+        .controls-container { background: white; margin: 20px; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .input-group { margin: 15px 0; }
+        .input-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .input-group input, .input-group textarea, .input-group select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+        .input-group textarea { height: 80px; resize: vertical; }
+        .button-group { display: flex; gap: 10px; margin-top: 20px; }
+        .btn { padding: 12px 24px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; }
+        .btn-primary { background-color: #ff9900; color: white; }
+        .btn-secondary { background-color: #6c757d; color: white; }
+        .btn-success { background-color: #28a745; color: white; }
+        .btn:hover { opacity: 0.9; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .status-indicator { padding: 10px; border-radius: 4px; margin: 10px 0; }
+        .status-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .status-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .status-info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .status-warning { background-color: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
+        main { display: flex; flex-wrap: wrap; padding: 20px; gap: 20px; }
+        .chart-container { flex: 1; min-width: 300px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .data-container { flex: 2; min-width: 400px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        #resultsTable { width: 100%; border-collapse: collapse; }
+        #resultsTable th, #resultsTable td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
+        #resultsTable th { background-color: #f2f2f2; }
+        .sentiment-POSITIVE { color: #2E7D32; font-weight: bold; }
+        .sentiment-NEGATIVE { color: #C62828; font-weight: bold; }
+        .sentiment-NEUTRAL { color: #616161; }
+        .sentiment-MIXED { color: #4527A0; }
+        .progress-bar { width: 100%; height: 20px; background-color: #f0f0f0; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+        .progress-fill { height: 100%; background-color: #ff9900; transition: width 0.3s ease; }
+        .hidden { display: none; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+    <header>
+        <h1>🎯 Reddit Sentiment Analysis Dashboard</h1>
+        <p>Real-time sentiment analysis of Reddit discussions</p>
+    </header>
+
+    <!-- User Input Controls -->
+    <div class="controls-container">
+        <h2>🔍 Start New Analysis</h2>
+        
+        <div id="status-message" class="hidden"></div>
+        
+        <form id="scraping-form">
+            <div class="input-group">
+                <label for="analysis-type">Analysis Type:</label>
+                <select id="analysis-type" name="analysis-type">
+                    <option value="keywords">Keyword Search</option>
+                    <option value="subreddits">Subreddit Analysis</option>
+                    <option value="both">Both Keywords & Subreddits</option>
+                </select>
+            </div>
+
+            <div class="input-group" id="keywords-group">
+                <label for="keywords-input">Business Keywords (comma-separated):</label>
+                <textarea id="keywords-input" name="keywords" placeholder="e.g., AWS Lambda pricing, serverless architecture, API Gateway costs, cloud functions performance"></textarea>
+                <small>Enter keywords relevant to your business or research interests</small>
+            </div>
+
+            <div class="input-group hidden" id="subreddits-group">
+                <label for="subreddits-input">Target Subreddits (comma-separated):</label>
+                <textarea id="subreddits-input" name="subreddits" placeholder="e.g., aws, serverless, devops, programming, webdev"></textarea>
+                <small>Enter subreddit names (without r/ prefix)</small>
+            </div>
+
+            <div class="input-group">
+                <label for="posts-limit">Posts per keyword/subreddit:</label>
+                <input type="number" id="posts-limit" name="posts-limit" value="25" min="10" max="100">
+                <small>Higher numbers take longer but provide more data</small>
+            </div>
+
+            <div class="button-group">
+                <button type="submit" class="btn btn-primary" id="start-analysis">🚀 Start Analysis</button>
+                <button type="button" class="btn btn-secondary" id="refresh-data">🔄 Refresh Dashboard</button>
+                <button type="button" class="btn btn-success" id="stop-analysis" disabled>⏹️ Stop Analysis</button>
+            </div>
+        </form>
+
+        <div id="progress-container" class="hidden">
+            <h3>Analysis Progress</h3>
+            <div class="progress-bar">
+                <div id="progress-fill" class="progress-fill" style="width: 0%;"></div>
+            </div>
+            <div id="progress-text">Initializing...</div>
+        </div>
+    </div>
+
+    <!-- Dashboard Data Display -->
+    <main>
+        <div class="chart-container">
+            <h2>📈 Sentiment Distribution</h2>
+            <canvas id="sentimentChart"></canvas>
+        </div>
+        
+        <div class="data-container">
+            <h2>📝 Latest Sentiment Analysis</h2>
+            <table id="resultsTable">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Text</th>
+                        <th>Sentiment</th>
+                        <th>Source</th>
+                    </tr>
+                </thead>
+                <tbody id="resultsBody">
+                    <tr><td colspan="4">Loading data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </main>
+
+    <script>
+        // --- CONFIGURATION ---
+        const API_BASE = 'http://localhost:8000';
+        // -------------------
+
+        // DOM Elements
+        const scrapingForm = document.getElementById('scraping-form');
+        const analysisType = document.getElementById('analysis-type');
+        const keywordsGroup = document.getElementById('keywords-group');
+        const subredditsGroup = document.getElementById('subreddits-group');
+        const keywordsInput = document.getElementById('keywords-input');
+        const subredditsInput = document.getElementById('subreddits-input');
+        const postsLimit = document.getElementById('posts-limit');
+        const startButton = document.getElementById('start-analysis');
+        const refreshButton = document.getElementById('refresh-data');
+        const stopButton = document.getElementById('stop-analysis');
+        const statusMessage = document.getElementById('status-message');
+        const progressContainer = document.getElementById('progress-container');
+        const progressFill = document.getElementById('progress-fill');
+        const progressText = document.getElementById('progress-text');
+        const resultsBody = document.getElementById('resultsBody');
+        const chartCanvas = document.getElementById('sentimentChart');
+        
+        let sentimentChart = null;
+        let analysisInProgress = false;
+        let pollInterval = null;
+
+        // Show/hide input groups based on analysis type
+        analysisType.addEventListener('change', function() {
+            const type = this.value;
+            
+            keywordsGroup.classList.toggle('hidden', type === 'subreddits');
+            subredditsGroup.classList.toggle('hidden', type === 'keywords');
+            
+            if (type === 'both') {
+                keywordsGroup.classList.remove('hidden');
+                subredditsGroup.classList.remove('hidden');
+            }
+        });
+
+        // Handle form submission
+        scrapingForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            await startAnalysis();
+        });
+
+        // Refresh button
+        refreshButton.addEventListener('click', fetchDashboardData);
+
+        // Stop button
+        stopButton.addEventListener('click', stopAnalysis);
+
+        async function startAnalysis() {
+            if (analysisInProgress) return;
+
+            const type = analysisType.value;
+            const keywords = keywordsInput.value.split(',').map(k => k.trim()).filter(k => k);
+            const subreddits = subredditsInput.value.split(',').map(s => s.trim()).filter(s => s);
+            const limit = parseInt(postsLimit.value);
+
+            // Validation
+            if (type === 'keywords' && keywords.length === 0) {
+                showStatus('Please enter at least one keyword', 'error');
+                return;
+            }
+            if (type === 'subreddits' && subreddits.length === 0) {
+                showStatus('Please enter at least one subreddit', 'error');
+                return;
+            }
+            if (type === 'both' && keywords.length === 0 && subreddits.length === 0) {
+                showStatus('Please enter keywords and/or subreddits', 'error');
+                return;
+            }
+
+            // Prepare request data
+            const requestData = {
+                analysis_type: type,
+                posts_limit: limit
+            };
+
+            if (keywords.length > 0) requestData.keywords = keywords;
+            if (subreddits.length > 0) requestData.subreddits = subreddits;
+
+            try {
+                analysisInProgress = true;
+                updateUIForAnalysis(true);
+                
+                showStatus('Starting analysis...', 'info');
+                updateProgress(0, 'Initiating Reddit scraping...');
+
+                // Start the analysis
+                const response = await fetch(`${API_BASE}/scrape/start`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestData)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to start analysis: ${response.status}`);
+                }
+
+                const result = await response.json();
+                
+                if (result.status === 'started') {
+                    showStatus(`Analysis started successfully! Job ID: ${result.job_id}`, 'success');
+                    
+                    // Start polling for progress
+                    startProgressPolling(result.job_id);
+                } else {
+                    throw new Error('Analysis failed to start');
+                }
+
+            } catch (error) {
+                console.error('Error starting analysis:', error);
+                showStatus(`Error: ${error.message}`, 'error');
+                updateUIForAnalysis(false);
+                analysisInProgress = false;
+            }
+        }
+
+        async function startProgressPolling(jobId) {
+            updateProgress(10, 'Scraping Reddit posts...');
+            
+            pollInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`${API_BASE}/scrape/status/${jobId}`);
+                    const status = await response.json();
+                    
+                    updateProgress(status.progress || 0, status.message || 'Processing...');
+                    
+                    if (status.status === 'completed') {
+                        clearInterval(pollInterval);
+                        updateProgress(100, 'Analysis complete! Processing sentiment...');
+                        
+                        // Wait a bit then process sentiment
+                        setTimeout(async () => {
+                            await processSentiment();
+                            analysisComplete();
+                        }, 2000);
+                        
+                    } else if (status.status === 'failed') {
+                        clearInterval(pollInterval);
+                        showStatus(`Analysis failed: ${status.error}`, 'error');
+                        updateUIForAnalysis(false);
+                        analysisInProgress = false;
+                    }
+                } catch (error) {
+                    console.error('Error checking status:', error);
+                }
+            }, 3000); // Check every 3 seconds
+        }
+
+        async function processSentiment() {
+            try {
+                showStatus('Processing sentiment analysis...', 'info');
+                
+                const response = await fetch(`${API_BASE}/process/sentiment`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        processing_mode: 'batch',
+                        batch_size: 50
+                    })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    showStatus(`Sentiment analysis complete! Processed ${result.results.processed_posts} posts`, 'success');
+                } else {
+                    showStatus('Sentiment processing completed with some errors', 'warning');
+                }
+            } catch (error) {
+                console.error('Error processing sentiment:', error);
+                showStatus('Error during sentiment processing', 'warning');
+            }
+        }
+
+        function analysisComplete() {
+            updateProgress(100, 'Analysis complete! Refreshing dashboard...');
+            
+            setTimeout(() => {
+                updateUIForAnalysis(false);
+                analysisInProgress = false;
+                fetchDashboardData();
+                showStatus('Analysis complete! Dashboard updated with new data.', 'success');
+            }, 2000);
+        }
+
+        function stopAnalysis() {
+            if (pollInterval) {
+                clearInterval(pollInterval);
+            }
+            analysisInProgress = false;
+            updateUIForAnalysis(false);
+            showStatus('Analysis stopped by user', 'warning');
+        }
+
+        function updateUIForAnalysis(inProgress) {
+            startButton.disabled = inProgress;
+            stopButton.disabled = !inProgress;
+            progressContainer.classList.toggle('hidden', !inProgress);
+            
+            if (!inProgress) {
+                updateProgress(0, '');
+            }
+        }
+
+        function updateProgress(percent, message) {
+            progressFill.style.width = `${percent}%`;
+            progressText.textContent = message;
+        }
+
+        function showStatus(message, type) {
+            statusMessage.textContent = message;
+            statusMessage.className = `status-indicator status-${type}`;
+            statusMessage.classList.remove('hidden');
+            
+            // Auto-hide success/info messages after 5 seconds
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => {
+                    statusMessage.classList.add('hidden');
+                }, 5000);
+            }
+        }
+
+        // Dashboard data fetching and rendering functions
+        async function fetchDashboardData() {
+            try {
+                showStatus('Refreshing dashboard data...', 'info');
+                
+                const response = await fetch(`${API_BASE}/sentiments?limit=50`);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch data: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                // Also fetch summary
+                const summaryResponse = await fetch(`${API_BASE}/sentiments/summary`);
+                const summaryData = summaryResponse.ok ? await summaryResponse.json() : null;
+                
+                renderTable(data);
+                renderChart(data, summaryData);
+                
+                showStatus(`Dashboard updated with ${data.length} records`, 'success');
+                
+            } catch (error) {
+                console.error('Error fetching dashboard data:', error);
+                showStatus(`Error loading data: ${error.message}`, 'error');
+                resultsBody.innerHTML = `<tr><td colspan="4" style="color: red;">Failed to load data</td></tr>`;
+            }
+        }
+
+        function renderTable(data) {
+            resultsBody.innerHTML = '';
+            
+            if (data.length === 0) {
+                resultsBody.innerHTML = `<tr><td colspan="4" style="text-align: center; padding: 20px;">No data available. Start an analysis to see results.</td></tr>`;
+                return;
+            }
+            
+            data.slice(0, 20).forEach(item => {
+                const row = document.createElement('tr');
+                const sentimentClass = `sentiment-${item.sentiment}`;
+                const truncatedText = item.inputText.length > 80 
+                    ? item.inputText.substring(0, 80) + '...' 
+                    : item.inputText;
+                
+                row.innerHTML = `
+                    <td>${new Date(item.timestamp).toLocaleString()}</td>
+                    <td title="${item.inputText}">${truncatedText}</td>
+                    <td class="${sentimentClass}">${item.sentiment}<br><small>${(item.confidence_score * 100).toFixed(1)}%</small></td>
+                    <td>${item.subreddit || 'Search'}</td>
+                `;
+                resultsBody.appendChild(row);
+            });
+        }
+
+        function renderChart(data, summaryData) {
+            let counts = { POSITIVE: 0, NEGATIVE: 0, NEUTRAL: 0, MIXED: 0 };
+            
+            if (summaryData) {
+                counts = {
+                    POSITIVE: summaryData.positive_count || 0,
+                    NEGATIVE: summaryData.negative_count || 0,
+                    NEUTRAL: summaryData.neutral_count || 0,
+                    MIXED: summaryData.mixed_count || 0
+                };
+            } else {
+                data.forEach(item => {
+                    if (counts.hasOwnProperty(item.sentiment)) {
+                        counts[item.sentiment]++;
+                    }
+                });
+            }
+
+            const chartData = {
+                labels: Object.keys(counts),
+                datasets: [{
+                    label: 'Sentiment Count',
+                    data: Object.values(counts),
+                    backgroundColor: ['#4CAF50', '#F44336', '#9E9E9E', '#673AB7'],
+                }]
+            };
+
+            if (sentimentChart) {
+                sentimentChart.destroy();
+            }
+
+            sentimentChart = new Chart(chartCanvas, {
+                type: 'pie',
+                data: chartData,
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { position: 'top' },
+                        title: { 
+                            display: true, 
+                            text: `Total Analyzed: ${Object.values(counts).reduce((a, b) => a + b, 0)}` 
+                        }
+                    }
+                },
+            });
+        }
+
+        // Initialize dashboard on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            fetchDashboardData();
+        });
+
+        // Auto-refresh dashboard every 30 seconds (when not analyzing)
+        setInterval(() => {
+            if (!analysisInProgress) {
+                fetchDashboardData();
+            }
+        }, 30000);
+
+    </script>
+</body>
+</html>

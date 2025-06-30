@@ -1,0 +1,16 @@
+praw
+# AWS SDK
+boto3
+
+# FastAPI and dependencies
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Data processing
+python-dotenv
+pydantic 
+
+# Utility libraries
+requests
+python-dateutil
